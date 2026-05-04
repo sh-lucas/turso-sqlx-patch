@@ -799,7 +799,7 @@ pub unsafe extern "C" fn sqlite3_context_db_handle(context: *mut ffi::c_void) ->
 pub unsafe extern "C" fn sqlite3_prepare_v2(
     raw_db: *mut sqlite3,
     sql: *const ffi::c_char,
-    _len: ffi::c_int,
+    len: ffi::c_int,
     out_stmt: *mut *mut sqlite3_stmt,
     tail: *mut *const ffi::c_char,
 ) -> ffi::c_int {
@@ -808,8 +808,13 @@ pub unsafe extern "C" fn sqlite3_prepare_v2(
     }
     let db: &mut sqlite3 = &mut *raw_db;
     let mut db = db.inner.lock().unwrap();
-    let sql_cstr = CStr::from_ptr(sql);
-    let sql_str = match sql_cstr.to_str() {
+    // A negative length means null-terminated; otherwise use the given byte count.
+    let sql_bytes = if len >= 0 {
+        std::slice::from_raw_parts(sql as *const u8, len as usize)
+    } else {
+        CStr::from_ptr(sql).to_bytes()
+    };
+    let sql_str = match std::str::from_utf8(sql_bytes) {
         Ok(s) => s,
         Err(_) => {
             db.err_code = SQLITE_MISUSE;
@@ -1734,10 +1739,10 @@ pub unsafe extern "C" fn sqlite3_column_type(
     idx: ffi::c_int,
 ) -> ffi::c_int {
     let stmt = &mut *stmt;
-    let row = stmt
-        .stmt
-        .row()
-        .expect("Function should only be called after `SQLITE_ROW`");
+    let row = match stmt.stmt.row() {
+        Some(r) => r,
+        None => return SQLITE_NULL,
+    };
 
     match row.get::<&Value>(idx as usize) {
         Ok(turso_core::Value::Numeric(turso_core::Numeric::Integer(_))) => SQLITE_INTEGER,
@@ -1936,9 +1941,16 @@ pub unsafe extern "C" fn sqlite3_value_blob(value: *mut ffi::c_void) -> *const f
         return std::ptr::null();
     }
     let v = &*(value as *const ExtValue);
-    match v.blob_ref() {
-        Some(b) => b.as_ptr() as *const ffi::c_void,
-        None => std::ptr::null(),
+    match v.value_type() {
+        turso_ext::ValueType::Blob => match v.blob_ref() {
+            Some(b) => b.as_ptr() as *const ffi::c_void,
+            None => std::ptr::null(),
+        },
+        turso_ext::ValueType::Text => match v.to_text() {
+            Some(s) => s.as_ptr() as *const ffi::c_void,
+            None => std::ptr::null(),
+        },
+        _ => std::ptr::null(),
     }
 }
 
