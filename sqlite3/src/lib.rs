@@ -2383,10 +2383,10 @@ pub unsafe extern "C" fn sqlite3_blob_close(_blob: *mut ffi::c_void) -> ffi::c_i
 
 #[no_mangle]
 pub unsafe extern "C" fn sqlite3_stricmp(
-    _a: *const ffi::c_char,
-    _b: *const ffi::c_char,
+    a: *const ffi::c_char,
+    b: *const ffi::c_char,
 ) -> ffi::c_int {
-    stub!();
+    libc::strcasecmp(a, b)
 }
 
 #[no_mangle]
@@ -2552,8 +2552,12 @@ pub unsafe extern "C" fn sqlite3_extended_errcode(db: *mut sqlite3) -> ffi::c_in
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn sqlite3_complete(_sql: *const ffi::c_char) -> ffi::c_int {
-    stub!();
+pub unsafe extern "C" fn sqlite3_complete(sql: *const ffi::c_char) -> ffi::c_int {
+    if sql.is_null() {
+        return 0;
+    }
+    let s = CStr::from_ptr(sql).to_bytes();
+    s.iter().rev().find(|&&b| !b.is_ascii_whitespace()).map_or(0, |&b| (b == b';') as ffi::c_int)
 }
 
 #[no_mangle]
