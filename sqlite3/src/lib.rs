@@ -2386,7 +2386,15 @@ pub unsafe extern "C" fn sqlite3_stricmp(
     a: *const ffi::c_char,
     b: *const ffi::c_char,
 ) -> ffi::c_int {
-    libc::strcasecmp(a, b)
+    let a = std::ffi::CStr::from_ptr(a).to_bytes();
+    let b = std::ffi::CStr::from_ptr(b).to_bytes();
+    for (x, y) in a.iter().zip(b.iter()) {
+        let diff = x.to_ascii_lowercase() as ffi::c_int - y.to_ascii_lowercase() as ffi::c_int;
+        if diff != 0 {
+            return diff;
+        }
+    }
+    a.len() as ffi::c_int - b.len() as ffi::c_int
 }
 
 #[no_mangle]
