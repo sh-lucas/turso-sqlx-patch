@@ -3636,4 +3636,135 @@ mod tests {
             assert_eq!(sqlite3_close(db), SQLITE_OK);
         }
     }
+
+    /// sqlite3_prepare_v2 must respect the `len` parameter when it is >= 0.
+    /// sqlx passes an explicit byte count with a buffer that may not be null-terminated.
+    /// If len is ignored, the tail pointer calculation is wrong and the next prepare
+    /// call tries to parse garbage memory.
+    #[test]
+    fn test_prepare_v2_explicit_len() {
+        unsafe {
+            let mut db: *mut sqlite3 = ptr::null_mut();
+            assert_eq!(sqlite3_open(c":memory:".as_ptr(), &mut db), SQLITE_OK);
+
+            // Buffer contains "SELECT 1; junk" — we pass len=8 so only "SELECT 1" is parsed.
+            let sql = b"SELECT 1; junk";
+            let mut stmt: *mut sqlite3_stmt = ptr::null_mut();
+            let mut tail: *const libc::c_char = ptr::null();
+            assert_eq!(
+                sqlite3_prepare_v2(
+                    db,
+                    sql.as_ptr() as *const libc::c_char,
+                    8,
+                    &mut stmt,
+                    &mut tail,
+                ),
+                SQLITE_OK
+            );
+            assert!(!stmt.is_null());
+            // tail must point to the byte right after the 8-byte slice
+            assert_eq!(
+                tail,
+                sql.as_ptr().add(8) as *const libc::c_char,
+                "tail must point past the explicit len bytes"
+            );
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            assert_eq!(sqlite3_column_int64(stmt, 0), 1);
+            assert_eq!(sqlite3_finalize(stmt), SQLITE_OK);
+
+            assert_eq!(sqlite3_close(db), SQLITE_OK);
+        }
+    }
+
+    /// sqlite3_column_type called before sqlite3_step must return SQLITE_NULL.
+    /// Previously it panicked with an expect() message.
+    #[test]
+    fn test_column_type_before_step_returns_null() {
+        unsafe {
+            let mut db: *mut sqlite3 = ptr::null_mut();
+            assert_eq!(sqlite3_open(c":memory:".as_ptr(), &mut db), SQLITE_OK);
+
+            let mut stmt: *mut sqlite3_stmt = ptr::null_mut();
+            assert_eq!(
+                sqlite3_prepare_v2(db, c"SELECT 1".as_ptr(), -1, &mut stmt, ptr::null_mut()),
+                SQLITE_OK
+            );
+            // No sqlite3_step call — must return SQLITE_NULL without panicking.
+            assert_eq!(sqlite3_column_type(stmt, 0), SQLITE_NULL);
+
+            assert_eq!(sqlite3_finalize(stmt), SQLITE_OK);
+            assert_eq!(sqlite3_close(db), SQLITE_OK);
+        }
+    }
+
+    /// sqlite3_value_blob must return the raw bytes for TEXT values.
+    /// sqlx-sqlite uses sqlite3_value_blob for both BLOB and TEXT columns;
+    /// previously only BLOB was handled and TEXT returned NULL.
+    #[test]
+    fn test_value_blob_for_text() {
+        unsafe extern "C" fn check_text_as_blob_fn(
+            ctx: *mut libc::c_void,
+            argc: i32,
+            argv: *mut *mut libc::c_void,
+        ) {
+            assert_eq!(argc, 1);
+            let value = *argv.add(0);
+            assert_eq!(sqlite3_value_type(value), SQLITE_TEXT);
+
+            let ptr = sqlite3_value_blob(value);
+            let len = sqlite3_value_bytes(value);
+
+            if ptr.is_null() || len <= 0 {
+                sqlite3_result_int(ctx, 0);
+                return;
+            }
+            let bytes = std::slice::from_raw_parts(ptr as *const u8, len as usize);
+            // "hello" → [104, 101, 108, 108, 111]
+            if bytes == b"hello" {
+                sqlite3_result_int(ctx, 1);
+            } else {
+                sqlite3_result_int(ctx, 0);
+            }
+        }
+
+        unsafe {
+            let mut db: *mut sqlite3 = ptr::null_mut();
+            assert_eq!(sqlite3_open(c":memory:".as_ptr(), &mut db), SQLITE_OK);
+
+            assert_eq!(
+                sqlite3_create_function_v2(
+                    db,
+                    c"check_text_as_blob".as_ptr(),
+                    1,
+                    SQLITE_UTF8,
+                    ptr::null_mut(),
+                    Some(check_text_as_blob_fn),
+                    None,
+                    None,
+                    None,
+                ),
+                SQLITE_OK
+            );
+
+            let mut stmt: *mut sqlite3_stmt = ptr::null_mut();
+            assert_eq!(
+                sqlite3_prepare_v2(
+                    db,
+                    c"SELECT check_text_as_blob('hello')".as_ptr(),
+                    -1,
+                    &mut stmt,
+                    ptr::null_mut(),
+                ),
+                SQLITE_OK
+            );
+            assert_eq!(sqlite3_step(stmt), SQLITE_ROW);
+            assert_eq!(
+                sqlite3_column_int64(stmt, 0),
+                1,
+                "sqlite3_value_blob must return raw bytes for TEXT values"
+            );
+            assert_eq!(sqlite3_finalize(stmt), SQLITE_OK);
+            assert_eq!(sqlite3_close(db), SQLITE_OK);
+        }
+    }
 }
